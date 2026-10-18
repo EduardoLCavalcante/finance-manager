@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import { serverSupabase } from "@/lib/supabase/server";
 import { applyCommand, emptyState } from "@/lib/finance/engine";
 import type { FinanceState } from "@/lib/finance/types";
+import { isAllowedOrigin } from "@/lib/request-origin";
 export const dynamic = "force-dynamic";
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 async function session() {
@@ -28,8 +29,7 @@ export async function GET() {
   return json(state);
 }
 export async function POST(request: Request) {
-  const origin = request.headers.get("origin");
-  if (origin && origin !== new URL(request.url).origin) return json({ error: "Origem inválida." }, 403);
+  if (!isAllowedOrigin(request)) return json({ error: "Origem inválida." }, 403);
   const db = await session();
   if (!db) return json({ error: "Sua sessão expirou. Entre novamente." }, 401);
   const body = await request.text();

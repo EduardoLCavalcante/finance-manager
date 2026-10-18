@@ -9,7 +9,8 @@ import { Field, FieldLabel, FieldDescription, FieldGroup } from "@/components/ui
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { banks, type FinanceState, type Purchase } from "@/lib/finance/types";
 import { cents, inputMoney, money, today } from "@/lib/finance/money";
-import { personBalance, suggestedMonth } from "@/lib/finance/engine";
+import { allocationStartDate, hasBillingDates, personBalance, suggestedMonth } from "@/lib/finance/engine";
+import { assignmentPurchases } from "@/lib/finance/installments";
 import { ImportForm } from "./import-form";
 
 export type Modal = { kind: "purchase" | "card" | "person" | "category" | "reimbursement" | "refund" | "classify" | "statement" | "import"; id?: string };
@@ -21,7 +22,7 @@ const titles: Record<Modal["kind"], [string, string]> = {
   category: ["Nova categoria", "Organize suas compras por tipo de despesa."],
   reimbursement: ["Registrar reembolso", "O valor será aplicado às despesas mais antigas desta pessoa."],
   refund: ["Registrar estorno", "O crédito será dividido proporcionalmente entre os responsáveis, preservando o histórico."],
-  classify: ["Atribuir compra", "Confirme a categoria e os responsáveis pela compra importada."],
+  classify: ["Atribuir compra", "Confirme a categoria e os responsáveis. A parte de terceiros passa a compor o saldo a receber."],
   statement: ["Conferir fatura", "Compare os lançamentos com o total informado pelo banco."],
   import: ["Importar compras", "Envie um CSV no modelo indicado e revise antes de confirmar."],
 };
@@ -55,29 +56,34 @@ export function FinanceDialog({ modal, onClose }: { modal: Modal | null; onClose
 }
 type FormProps = { state: FinanceState; submit: Submit; safe: (fn: () => Promise<void> | void) => void };
 function PurchaseForm({ state, submit, safe, purchase }: FormProps & { purchase?: Purchase }) {
-  const [cardId, setCardId] = useState(purchase?.card_id ?? state.cards[0]?.id ?? "");
+  const targets = purchase ? assignmentPurchases(state, purchase.id) : [];
+  const assignmentAmount = targets.reduce((sum, purchase) => sum + purchase.amount, 0);
+  const availableCards = state.cards.filter(hasBillingDates);
+  const [cardId, setCardId] = useState(purchase?.card_id ?? availableCards[0]?.id ?? "");
   const [date, setDate] = useState(purchase?.purchase_date ?? today());
-  const [amount, setAmount] = useState(purchase ? inputMoney(purchase.amount) : "");
+  const [amount, setAmount] = useState(purchase ? inputMoney(assignmentAmount) : "");
   const [responsible, setResponsible] = useState(state.people.find(p => p.is_owner)?.id ?? "");
   const [shares, setShares] = useState<Record<string, string>>({});
-  const [firstMonth, setFirstMonth] = useState(state.cards[0] ? suggestedMonth(today(), state.cards[0]) : today().slice(0, 7));
+  const [firstMonth, setFirstMonth] = useState(() => availableCards[0] ? suggestedMonth(today(), availableCards[0]) : today().slice(0, 7));
+  const historical = !purchase && date < allocationStartDate(state);
   let total = 0, allocated = 0;
-  try { total = amount ? cents(amount) : 0; allocated = Object.values(shares).reduce((s, n) => s + (n ? cents(n) : 0), 0); } catch { /* Submission presents invalid amounts. */ }
+  try { total = purchase ? assignmentAmount : amount ? cents(amount) : 0; allocated = Object.values(shares).reduce((s, n) => s + (n ? cents(n) : 0), 0); } catch { /* Submission presents invalid amounts. */ }
   if (!state.cards.length && !purchase) return <p className="empty-note">Cadastre um cartão em “Cartões” antes de registrar uma compra.</p>;
+  if (!availableCards.length && !purchase) return <p className="empty-note">Seus cartões aguardam as datas de fechamento e vencimento da Pluggy. Sincronize novamente quando os dados estiverem disponíveis para registrar compras.</p>;
   return <form onSubmit={e => { const d = formValues(e); safe(() => {
-    const allocations = responsible === "shared" ? Object.entries(shares).filter(([, v]) => v && cents(v) > 0).map(([person_id, v]) => ({ person_id, amount: cents(v) })) : [{ person_id: responsible, amount: cents(amount) }];
+    const allocations = historical ? [] : responsible === "shared" ? Object.entries(shares).filter(([, v]) => v && cents(v) > 0).map(([person_id, v]) => ({ person_id, amount: cents(v) })) : [{ person_id: responsible, amount: total }];
     const common = { category_id: d.get("category") || null, allocations };
     return submit(purchase ? { type: "classify", purchase_id: purchase.id, ...common } : { type: "add_purchase", card_id: cardId, merchant: d.get("merchant"), purchase_date: date, amount: cents(amount), installments: Number(d.get("installments")), first_month: firstMonth, ...common });
   }); }}><FieldGroup>
-    {purchase ? <div className="purchase-summary"><strong>{purchase.merchant}</strong><span>{money(purchase.amount)}</span></div> : <>
+    {purchase ? <><div className="purchase-summary"><strong>{purchase.merchant}</strong><span>{money(assignmentAmount)}</span></div>{targets.length > 1 ? <p className="text-muted">Esta atribuição vale para as {targets.length} parcelas agrupadas ainda sem responsável{targets.some(target => target.status === "historical") ? ", incluindo as históricas" : ""}. As parcelas já atribuídas serão preservadas.</p> : null}</> : <>
       <FormField label="Estabelecimento"><Input name="merchant" placeholder="Onde você comprou?" maxLength={160} required autoFocus /></FormField>
       <div className="form-grid"><FormField label="Valor total (R$)"><Input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0,00" required /></FormField><FormField label="Data da compra"><Input type="date" value={date} onChange={e => { setDate(e.target.value); if (e.target.value) setFirstMonth(suggestedMonth(e.target.value, state.cards.find(c => c.id === cardId)!)); }} min="2000-01-01" max="2099-12-31" required /></FormField></div>
-      <FormField label="Cartão"><select value={cardId} onChange={e => { setCardId(e.target.value); setFirstMonth(suggestedMonth(date, state.cards.find(c => c.id === e.target.value)!)); }} required>{state.cards.map(c => <option key={c.id} value={c.id}>{c.name} · {c.last_four}</option>)}</select></FormField>
+      <FormField label="Cartão" hint={availableCards.length < state.cards.length ? "Cartões sem fechamento ou vencimento aguardam dados da Pluggy e não podem receber compras." : undefined}><select value={cardId} onChange={e => { setCardId(e.target.value); setFirstMonth(suggestedMonth(date, state.cards.find(c => c.id === e.target.value)!)); }} required>{state.cards.map(c => <option key={c.id} value={c.id} disabled={!hasBillingDates(c)}>{c.name} · {c.last_four}{hasBillingDates(c) ? "" : " · Aguardando datas da Pluggy"}</option>)}</select></FormField>
       <div className="form-grid"><FormField label="Número de parcelas"><Input type="number" name="installments" min={1} max={120} defaultValue={1} required /></FormField><FormField label="Primeira fatura" hint="Mês de vencimento; ajuste conforme o banco."><Input type="month" value={firstMonth} min={date.slice(0, 7)} max="2099-12" onChange={e => setFirstMonth(e.target.value)} required /></FormField></div>
     </>}
     <FormField label="Categoria"><select name="category" defaultValue={purchase?.category_id ?? ""}><option value="">Sem categoria</option>{state.categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></FormField>
-    <FormField label="Quem paga esta compra?"><select value={responsible} onChange={e => setResponsible(e.target.value)}>{state.people.map(p => <option key={p.id} value={p.id}>{p.name}{p.is_owner ? " (minha despesa)" : ""}</option>)}<option value="shared">Compartilhar entre responsáveis</option></select></FormField>
-    {responsible === "shared" ? <fieldset className="shares"><legend>Parte de cada pessoa no valor total</legend>{state.people.map(p => <FormField key={p.id} label={p.name}><Input inputMode="decimal" aria-label={`Parte de ${p.name}`} placeholder="0,00" value={shares[p.id] ?? ""} onChange={e => setShares({ ...shares, [p.id]: e.target.value })} /></FormField>)}<p className={total === allocated ? "text-green" : "text-muted"}>Distribuído: {money(allocated)} de {money(total)}</p></fieldset> : null}
+    {historical ? <p className="text-muted">Compra histórica: não exige responsável nem gera valores a receber.</p> : <FormField label="Quem paga esta compra?"><select value={responsible} onChange={e => setResponsible(e.target.value)}>{state.people.map(p => <option key={p.id} value={p.id}>{p.name}{p.is_owner ? " (minha despesa)" : ""}</option>)}<option value="shared">Compartilhar entre responsáveis</option></select></FormField>}
+    {!historical && responsible === "shared" ? <fieldset className="shares"><legend>Parte de cada pessoa no valor total</legend>{state.people.map(p => <FormField key={p.id} label={p.name}><Input inputMode="decimal" aria-label={`Parte de ${p.name}`} placeholder="0,00" value={shares[p.id] ?? ""} onChange={e => setShares({ ...shares, [p.id]: e.target.value })} /></FormField>)}<p className={total === allocated ? "text-green" : "text-muted"}>Distribuído: {money(allocated)} de {money(total)}</p></fieldset> : null}
   </FieldGroup><Footer label={purchase ? "Confirmar atribuição" : "Registrar compra"} /></form>;
 }
 function ReimbursementForm({ state, submit, safe, personId }: FormProps & { personId?: string }) {

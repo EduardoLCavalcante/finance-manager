@@ -25,4 +25,4 @@ export async function proxy(request: NextRequest) {
   }
   return response;
 }
-export const config = { matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|manifest.webmanifest|modelo-compras.csv).*)"] };
+export const config = { matcher: ["/((?!_next/static|_next/image|favicon.ico|icon.svg|icons/|manifest.webmanifest|sw.js|offline.html|modelo-compras.csv).*)"] };

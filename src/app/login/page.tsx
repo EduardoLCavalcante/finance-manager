@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { ArrowRight, ShieldCheck } from "lucide-react";
 import { browserSupabase } from "@/lib/supabase/browser";
@@ -9,6 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { FieldGroup } from "@/components/ui/field";
 import { FormField } from "@/components/finance/forms";
 export default function Login() {
+  const router = useRouter();
   const [signup, setSignup] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setMessage("");
@@ -18,7 +20,7 @@ export default function Login() {
       const credentials = { email: String(data.get("email")), password: String(data.get("password")) };
       const result = signup ? await db.auth.signUp({ ...credentials, options: { emailRedirectTo: `${window.location.origin}/auth/callback` } }) : await db.auth.signInWithPassword(credentials);
       if (result.error) { setMessage(signup ? "Não foi possível criar a conta. Confira os dados ou tente novamente mais tarde." : "Não foi possível entrar. Confira e-mail, senha e a confirmação do e-mail."); return; }
-      if (result.data.session) window.location.assign("/dashboard");
+      if (result.data.session) { router.replace("/dashboard"); router.refresh(); }
       else setMessage("Confira seu e-mail para confirmar o cadastro. Depois, volte para entrar.");
     } catch { setMessage("Não foi possível conectar. Tente novamente."); } finally { setBusy(false); }
   }

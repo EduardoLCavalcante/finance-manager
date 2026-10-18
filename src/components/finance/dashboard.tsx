@@ -30,10 +30,10 @@ export function Dashboard({ filters, onPurchase }: { filters: Filters; onPurchas
       <Panel title="Seus cartões" className="cards-panel">
         {!state.cards.length ? <Blank title="Seu primeiro cartão" description="Cadastre um cartão para começar." /> : <div className="card-list">{state.cards.filter(c => !filters.bank || c.institution_id === filters.bank).map(card => {
           const invoice = state.invoices.find(i => i.card_id === card.id && i.month === filters.month);
-          const value = state.charges.filter(c => c.invoice_id === invoice?.id).reduce((s, c) => s + c.amount, 0);
+          const value = invoice?.statement_total ?? state.charges.filter(c => c.invoice_id === invoice?.id).reduce((s, c) => s + c.amount, 0);
           return <Link href={href("invoices")} className="card-row" key={card.id}><CardName card={card} /><span className="card-total"><small>Fatura do mês</small><strong>{money(value)}</strong></span><ChevronRight size={16} /></Link>;
         })}</div>}
-        <div className="panel-footnote"><Info size={15} /><span>Importação manual. Os totais dos cartões mostram a fatura completa.</span></div>
+        <div className="panel-footnote"><Info size={15} /><span>Os totais usam a fatura do banco quando disponível; os demais são estimativas dos lançamentos.</span></div>
       </Panel>
     </div>
     <Panel title="Lançamentos do mês" action={<Button variant="link" asChild><Link href={href("transactions")}>Ver todas <ArrowRight /></Link></Button>}><Transactions filters={filters} onPurchase={onPurchase} limit={7} /></Panel>

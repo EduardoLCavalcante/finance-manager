@@ -1,21 +1,31 @@
 import type { Allocation, Card, FinanceState, Invoice, Purchase } from "./types";
-import { addMonths, distribute, monthDate, splitEvenly } from "./money";
+import { addMonths, brazilDate, distribute, monthDate, splitEvenly, today } from "./money";
 import { commandSchema, type Command, type ImportRow } from "./schema";
+import { assignmentPurchases, purchaseGroups } from "./installments";
 
 const uuid = () => crypto.randomUUID();
 export function emptyState(): FinanceState {
-  return { revision: 0, cards: [], people: [{ id: uuid(), name: "Eu", is_owner: true }], categories: ["Alimentação", "Compras", "Eletrônicos", "Saúde", "Transporte", "Casa", "Lazer", "Serviços"].map(name => ({ id: uuid(), name })), purchases: [], invoices: [], charges: [], allocations: [], refunds: [], refund_allocations: [], reimbursements: [], reimbursement_allocations: [], sources: [], imports: [], audit: [] };
+  return { revision: 0, cards: [], people: [{ id: uuid(), name: "Eu", is_owner: true }], categories: ["Alimentação", "Compras", "Eletrônicos", "Saúde", "Transporte", "Casa", "Lazer", "Serviços"].map(name => ({ id: uuid(), name })), purchases: [], invoices: [], charges: [], allocations: [], refunds: [], refund_allocations: [], reimbursements: [], reimbursement_allocations: [], sources: [], imports: [], audit: [], bank_entries: [] };
+}
+export function allocationStartDate(state: FinanceState) {
+  const first = state.audit.map(a => a.created_at).sort()[0];
+  return first ? brazilDate(first) : today();
 }
 function required<T>(item: T | undefined, message = "Registro não encontrado."): T { if (!item) throw new Error(message); return item; }
+export function hasBillingDates(card: Card): card is Card & { closing_day: number; due_day: number } {
+  return card.closing_day !== null && card.due_day !== null;
+}
 export function suggestedMonth(date: string, card: Card) {
+  if (!hasBillingDates(card)) throw new Error("Este cartão aguarda as datas de fechamento e vencimento da Pluggy para receber compras.");
   const month = date.slice(0, 7);
   const closed = date > monthDate(month, card.closing_day);
   return addMonths(month, (closed ? 1 : 0) + (card.due_day <= card.closing_day ? 1 : 0));
 }
 function invoiceFor(state: FinanceState, card: Card, month: string): Invoice {
+  if (!hasBillingDates(card)) throw new Error("Este cartão aguarda as datas de fechamento e vencimento da Pluggy para receber compras.");
   let invoice = state.invoices.find(i => i.card_id === card.id && i.month === month);
   if (!invoice) {
-    invoice = { id: uuid(), card_id: card.id, month, due_date: monthDate(month, card.due_day), closing_date: monthDate(addMonths(month, card.due_day <= card.closing_day ? -1 : 0), card.closing_day), statement_total: null, paid_at: null };
+    invoice = { id: uuid(), card_id: card.id, month, due_date: monthDate(month, card.due_day), closing_date: monthDate(addMonths(month, card.due_day <= card.closing_day ? -1 : 0), card.closing_day), statement_total: null, paid_at: null, bank_id: null };
     state.invoices.push(invoice);
   }
   return invoice;
@@ -29,19 +39,61 @@ function allocate(state: FinanceState, purchase: Purchase, shares: { person_id: 
   });
   purchase.status = "confirmed";
 }
-function addPurchase(state: FinanceState, data: { card_id: string; merchant: string; purchase_date: string; amount: number; installments: number; first_month: string; category_id: string | null }, shares?: { person_id: string; amount: number }[]) {
+function assignPurchases(state: FinanceState, purchases: Purchase[], categoryId: string | null, shares: { person_id: string; amount: number }[]) {
+  if (shares.reduce((sum, share) => sum + share.amount, 0) !== purchases.reduce((sum, purchase) => sum + purchase.amount, 0)) throw new Error("A divisão deve somar exatamente o valor das compras e parcelas selecionadas.");
+  if (new Set(shares.map(share => share.person_id)).size !== shares.length) throw new Error("Cada responsável deve aparecer uma única vez.");
+  shares.forEach(share => required(state.people.find(person => person.id === share.person_id), "Responsável não encontrado."));
+  const remaining = shares.map(share => share.amount);
+  for (const purchase of purchases) {
+    const amounts = distribute(purchase.amount, remaining);
+    amounts.forEach((amount, i) => { remaining[i] -= amount; });
+    purchase.category_id = categoryId;
+    allocate(state, purchase, shares.map((share, i) => ({ person_id: share.person_id, amount: amounts[i] })).filter(share => share.amount > 0));
+  }
+}
+export function inheritInstallmentAssignments(state: FinanceState, importedIds: Set<string>) {
+  if (!importedIds.size) return;
+  for (const group of purchaseGroups(state)) {
+    if (!group.installmentCount) continue;
+    const previous = group.purchases.filter(purchase => !importedIds.has(purchase.id));
+    const resolved = previous.filter(purchase => purchase.status === "confirmed" || purchase.status === "skipped");
+    if (!resolved.length) continue;
+    if (resolved.every(purchase => purchase.status === "skipped")) {
+      group.purchases.filter(purchase => importedIds.has(purchase.id)).forEach(purchase => { purchase.status = "skipped"; });
+      continue;
+    }
+    if (resolved.some(purchase => purchase.status !== "confirmed" || purchase.category_id !== resolved[0].category_id)) continue;
+    const allocations = resolved.map(purchase => state.allocations.filter(allocation => allocation.purchase_id === purchase.id));
+    const people = [...new Set(allocations.flatMap(shares => shares.map(share => share.person_id)))].sort();
+    const sums = people.map(personId => allocations.flat().filter(share => share.person_id === personId).reduce((sum, share) => sum + share.amount, 0));
+    const total = resolved.reduce((sum, purchase) => sum + purchase.amount, 0);
+    const consistent = resolved.every((purchase, i) => people.every((personId, j) => {
+      const allocated = allocations[i].find(share => share.person_id === personId)?.amount ?? 0;
+      const difference = BigInt(allocated) * BigInt(total) - BigInt(purchase.amount) * BigInt(sums[j]);
+      return difference <= BigInt(total) && difference >= -BigInt(total);
+    }));
+    if (!consistent || !total || !sums.some(Boolean)) continue;
+    for (const purchase of group.purchases.filter(purchase => importedIds.has(purchase.id) && purchase.status === "pending")) {
+      allocate(state, purchase, distribute(purchase.amount, sums).map((amount, i) => ({ person_id: people[i], amount })).filter(share => share.amount > 0));
+      purchase.category_id = resolved[0].category_id;
+    }
+  }
+}
+export function addPurchase(state: FinanceState, data: { card_id: string; merchant: string; purchase_date: string; amount: number; installments: number; first_month: string; category_id: string | null }, shares?: { person_id: string; amount: number }[], bankInvoice?: Invoice) {
   const card = required(state.cards.find(c => c.id === data.card_id), "Cadastre um cartão primeiro.");
+  if (!hasBillingDates(card) && !bankInvoice) throw new Error("Este cartão aguarda as datas de fechamento e vencimento da Pluggy para receber compras.");
+  if (bankInvoice && (bankInvoice.card_id !== card.id || bankInvoice.month !== data.first_month || data.installments !== 1 || !state.invoices.includes(bankInvoice))) throw new Error("Fatura bancária incompatível com a compra.");
   if (data.category_id) required(state.categories.find(c => c.id === data.category_id), "Categoria não encontrada.");
   if (data.amount < data.installments) throw new Error("O valor não pode gerar parcelas menores que um centavo.");
-  if (data.first_month < data.purchase_date.slice(0, 7)) throw new Error("A primeira fatura não pode ser anterior à compra.");
+  if (!bankInvoice && data.first_month < data.purchase_date.slice(0, 7)) throw new Error("A primeira fatura não pode ser anterior à compra.");
   const { first_month, ...fields } = data;
-  const purchase: Purchase = { id: uuid(), ...fields, status: "pending" };
+  const purchase: Purchase = { id: uuid(), ...fields, status: data.purchase_date < allocationStartDate(state) && !shares?.length ? "historical" : "pending" };
   state.purchases.push(purchase);
   splitEvenly(data.amount, data.installments).forEach((amount, i) => {
-    const invoice = invoiceFor(state, card, addMonths(first_month, i));
+    const invoice = bankInvoice ?? invoiceFor(state, card, addMonths(first_month, i));
     state.charges.push({ id: uuid(), purchase_id: purchase.id, invoice_id: invoice.id, amount, installment_no: i + 1, kind: "purchase", refund_id: null });
   });
-  if (shares) allocate(state, purchase, shares);
+  if (shares?.length) allocate(state, purchase, shares);
   return purchase;
 }
 export function allocationBalance(state: FinanceState, allocation: Allocation) {
@@ -77,16 +129,22 @@ export function applyCommand(input: FinanceState, raw: unknown): FinanceState {
       break;
     }
     case "add_purchase": {
+      if (command.purchase_date >= allocationStartDate(state) && !command.allocations.length) throw new Error("Defina o responsável pelas compras a partir do início do acompanhamento.");
       const purchase = addPurchase(state, command, command.allocations);
       state.sources.push({ id: uuid(), purchase_id: purchase.id, card_id: purchase.card_id, source_type: "manual", external_id: command.id, import_id: null });
       break;
     }
     case "classify": {
       const purchase = required(state.purchases.find(p => p.id === command.purchase_id));
-      if (purchase.status !== "pending") throw new Error("Esta compra já foi atribuída.");
+      if (purchase.status === "confirmed") throw new Error("Esta compra já foi atribuída.");
       if (command.category_id) required(state.categories.find(c => c.id === command.category_id));
-      purchase.category_id = command.category_id;
-      allocate(state, purchase, command.allocations);
+      assignPurchases(state, assignmentPurchases(state, purchase.id), command.category_id, command.allocations);
+      break;
+    }
+    case "skip_assignment": {
+      const purchase = required(state.purchases.find(p => p.id === command.purchase_id));
+      if (purchase.status !== "pending" && purchase.status !== "historical") throw new Error("Esta compra já foi atribuída ou dispensada.");
+      assignmentPurchases(state, purchase.id).forEach(purchase => { purchase.status = "skipped"; });
       break;
     }
     case "refund": {

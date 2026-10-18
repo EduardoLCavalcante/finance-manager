@@ -11,6 +11,7 @@ export function cents(value: string): number {
 }
 export const inputMoney = (value: number) => (value / 100).toFixed(2).replace(".", ",");
 export const today = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+export const brazilDate = (date: string) => date.length === 10 ? date : new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(date));
 export function addMonths(month: string, offset: number) {
   const [year, m] = month.slice(0, 7).split("-").map(Number);
   const date = new Date(Date.UTC(year, m - 1 + offset, 1));
@@ -19,7 +20,7 @@ export function addMonths(month: string, offset: number) {
 export function monthLabel(month: string, short = false) {
   return new Intl.DateTimeFormat("pt-BR", { month: short ? "short" : "long", year: short ? "2-digit" : "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T12:00:00Z`));
 }
-export function dateLabel(date: string) { return new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC" }).format(new Date(`${date.slice(0, 10)}T12:00:00Z`)); }
+export function dateLabel(date: string | null) { return date ? new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC" }).format(new Date(`${date.slice(0, 10)}T12:00:00Z`)) : "Não informado"; }
 export function monthDate(month: string, day: number) {
   const [y, m] = month.split("-").map(Number);
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
